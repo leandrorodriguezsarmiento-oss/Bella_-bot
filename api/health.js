@@ -1,0 +1,1 @@
+export default async function handler(req,res){res.status(200).json({ok:true,service:'Bella Club Bot',telegramConfigured:!!(process.env.TELEGRAM_TOKEN||process.env.TELEGRAM_BOT_TOKEN),databaseConfigured:!!process.env.DATABASE_URL});}
