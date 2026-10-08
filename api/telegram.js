@@ -36,6 +36,11 @@ async function pendingForAdmin(db){
 }
 
 export default async function handler(req,res){if(req.method!=='POST')return res.status(200).json({ok:true});try{if(!token()||!process.env.DATABASE_URL)throw new Error('Configuration missing');const db=sql();await init(db);const u=req.body||{};const m=u.message||u.callback_query?.message;const chat=m?.chat?.id;if(!chat)return res.status(200).json({ok:true});const from=u.message?.from||u.callback_query?.from||{};await db`INSERT INTO bella_users(telegram_id,username,first_name) VALUES(${chat},${from.username||null},${from.first_name||null}) ON CONFLICT(telegram_id) DO UPDATE SET username=EXCLUDED.username,first_name=EXCLUDED.first_name,updated_at=NOW()`;const text=u.message?.text||'';const cb=u.callback_query?.data||'';
+if(isAdmin(from.id)&&(cb.startsWith('lang_')||cb==='adult_yes'||cb==='adult_no')){
+ await tg('answerCallbackQuery',{callback_query_id:u.callback_query.id,text:'Usa el panel administrador.'});
+ await tg('sendMessage',{chat_id:chat,text:'🛡️ BELLA CLUB · Panel administrador',reply_markup:adminMenu});
+ return res.status(200).json({ok:true});
+}
 if(cb.startsWith('lang_')){const lang=cb.slice(5);await db`UPDATE bella_users SET language=${lang} WHERE telegram_id=${chat}`;await tg('answerCallbackQuery',{callback_query_id:u.callback_query.id});await tg('sendMessage',{chat_id:chat,text:'🔞 Bella Club es solo para mayores de 18 años.\n\n¿Confirmas que tienes 18 años o más?',reply_markup:{inline_keyboard:[[{text:'✅ Sí, soy +18',callback_data:'adult_yes'},{text:'❌ No',callback_data:'adult_no'}]]}});return res.status(200).json({ok:true});}
 if(cb==='adult_yes'){await db`UPDATE bella_users SET is_adult=TRUE,state='menu' WHERE telegram_id=${chat}`;await tg('answerCallbackQuery',{callback_query_id:u.callback_query.id});await tg('sendMessage',{chat_id:chat,text:'🔥 BELLA CLUB\n\n✅ Registro completado.\nElige una opción:',reply_markup:menu});return res.status(200).json({ok:true});}
 if(cb==='adult_no'){await tg('answerCallbackQuery',{callback_query_id:u.callback_query.id});await tg('sendMessage',{chat_id:chat,text:'❌ Este servicio es solo para mayores de 18 años.'});return res.status(200).json({ok:true});}
