@@ -55,7 +55,16 @@ if(cb.startsWith('review_')){
  }
  return res.status(200).json({ok:true});
 }
-if(text==='/pendientes'&&String(from.id)===adminId()){
+if(text==='/miid'||text==='/id'){
+ const myId=String(from.id||chat);
+ await tg('sendMessage',{chat_id:chat,text:'🪪 Identificación de Telegram\\n\\nTu ID: '+myId+'\\nAcceso administrador: '+(myId===adminId()?'✅ Sí':'❌ No')+'\\n\\nSi no coincide, el ADMIN_ID de Bella Club debe actualizarse al ID de tu cuenta.'});
+ return res.status(200).json({ok:true});
+}
+if(text==='/pendientes'){
+ if(String(from.id)!==adminId()){
+   await tg('sendMessage',{chat_id:chat,text:'🔐 Esta cuenta no figura como administradora.\\nEnvía /miid para comprobar tu ID de Telegram y corregir el acceso.'});
+   return res.status(200).json({ok:true});
+ }
  await pendingForAdmin(db);
  return res.status(200).json({ok:true});
 }
