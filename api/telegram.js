@@ -76,6 +76,7 @@ if(u.message?.photo||u.message?.video){
  catch(e){delivered=false;console.error('admin_delivery_failed',contentId,e.message);}
  await tg('sendMessage',{chat_id:chat,text:delivered?'✅ Contenido recibido y enviado a revisión. #'+contentId:'✅ Tu contenido #'+contentId+' quedó guardado. ⚠️ La notificación al administrador falló; la publicación sigue pendiente de revisión.',reply_markup:menu});
  return res.status(200).json({ok:true});
+}
 
 if(text==='💸 Retirar PIX'){if(Number(user.balance)<20){await tg('sendMessage',{chat_id:chat,text:'⚠️ El retiro mínimo es R$ 20. Tu saldo disponible todavía no alcanza el mínimo.',reply_markup:menu});}else{await db`UPDATE bella_users SET state='await_pix' WHERE telegram_id=${chat}`;await tg('sendMessage',{chat_id:chat,text:'💳 Envíame tu clave PIX.'});}return res.status(200).json({ok:true});}
 if(text==='📜 Historial'){const c=await db`SELECT id,media_type,status,created_at FROM bella_content WHERE telegram_id=${chat} ORDER BY id DESC LIMIT 5`;const w=await db`SELECT id,amount,status,created_at FROM bella_withdrawals WHERE telegram_id=${chat} ORDER BY id DESC LIMIT 5`;let out='📜 Historial\n';for(const x of c)out+=`\n📸 #${x.id} ${x.media_type} — ${x.status}`;for(const x of w)out+=`\n💸 #${x.id} R$ ${Number(x.amount).toFixed(2)} — ${x.status}`;if(!c.length&&!w.length)out+='\n\nTodavía no tienes movimientos.';await tg('sendMessage',{chat_id:chat,text:out,reply_markup:menu});return res.status(200).json({ok:true});}
