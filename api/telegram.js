@@ -1,4 +1,5 @@
 import { neon } from '@neondatabase/serverless';
+import {createHash} from 'node:crypto';
 const token=()=>process.env.TELEGRAM_TOKEN||process.env.TELEGRAM_BOT_TOKEN;
 const sql=()=>neon(process.env.DATABASE_URL);
 async function tg(method,body){const r=await fetch(`https://api.telegram.org/bot${token()}/${method}`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});const j=await r.json();if(!j.ok)throw new Error(j.description||'Telegram error');return j.result;}
@@ -70,7 +71,13 @@ async function pendingForAdmin(db){
  }
 }
 
-export default async function handler(req,res){if(req.method!=='POST')return res.status(200).json({ok:true});try{if(!token()||!process.env.DATABASE_URL)throw new Error('Configuration missing');const db=sql();await init(db);const u=req.body||{};const m=u.message||u.callback_query?.message;const chat=m?.chat?.id;if(!chat)return res.status(200).json({ok:true});const from=u.message?.from||u.callback_query?.from||{};await db`INSERT INTO bella_users(telegram_id,username,first_name) VALUES(${chat},${from.username||null},${from.first_name||null}) ON CONFLICT(telegram_id) DO UPDATE SET username=EXCLUDED.username,first_name=EXCLUDED.first_name,updated_at=NOW()`;const text=u.message?.text||'';const cb=u.callback_query?.data||'';
+export default async function handler(req,res){
+ if(req.method!=='POST')return res.status(200).json({ok:true});
+ const rawSecret=process.env.WEBHOOK_SECRET;
+ const actualSecret=req.headers?.['x-telegram-bot-api-secret-token'];
+ const expectedSecret=rawSecret?createHash('sha256').update(rawSecret).digest('hex'):null;
+ if(!expectedSecret||actualSecret!==expectedSecret)return res.status(403).json({ok:false,error:'Invalid webhook signature'});
+ try{if(!token()||!process.env.DATABASE_URL)throw new Error('Configuration missing');const db=sql();await init(db);const u=req.body||{};const m=u.message||u.callback_query?.message;const chat=m?.chat?.id;if(!chat)return res.status(200).json({ok:true});const from=u.message?.from||u.callback_query?.from||{};await db`INSERT INTO bella_users(telegram_id,username,first_name) VALUES(${chat},${from.username||null},${from.first_name||null}) ON CONFLICT(telegram_id) DO UPDATE SET username=EXCLUDED.username,first_name=EXCLUDED.first_name,updated_at=NOW()`;const text=u.message?.text||'';const cb=u.callback_query?.data||'';
 if(isAdmin(from.id)&&(cb.startsWith('lang_')||cb==='adult_yes'||cb==='adult_no')){
  await tg('answerCallbackQuery',{callback_query_id:u.callback_query.id,text:'Usa el panel administrador.'});
  await tg('sendMessage',{chat_id:chat,text:'🛡️ BELLA CLUB · Panel administrador',reply_markup:adminMenu});
