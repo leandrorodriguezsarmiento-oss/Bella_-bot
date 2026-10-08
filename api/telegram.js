@@ -6,6 +6,8 @@ async function init(db){await db`CREATE TABLE IF NOT EXISTS bella_users (telegra
 const menu={keyboard:[[{text:'👤 Mi perfil'},{text:'💰 Saldo'}],[{text:'📸 Enviar contenido'},{text:'💸 Retirar PIX'}],[{text:'📜 Historial'}]],resize_keyboard:true};
 
 const adminId=()=>String(process.env.ADMIN_ID||'').trim();
+const isAdmin=id=>String(id||'')===adminId();
+const adminMenu={keyboard:[[{text:'📥 Revisar pendientes'},{text:'📊 Resumen'}],[{text:'🏠 Panel admin'}]],resize_keyboard:true,is_persistent:true,one_time_keyboard:false,input_field_placeholder:'Revisión de publicaciones'};
 const reviewButtons=id=>({inline_keyboard:[[{text:'✅ Aprobar',callback_data:'review_approve_'+id},{text:'❌ Rechazar',callback_data:'review_reject_'+id}]]});
 function reviewCaption({id,chat,username,type,caption}){
  const who=username?'@'+String(username).replace(/[^a-zA-Z0-9_]/g,'').slice(0,60):'Sin usuario público';
@@ -25,8 +27,8 @@ async function sendReview({id,chat,username,type,caption,messageId,fileId}){
 }
 async function pendingForAdmin(db){
  const items=await db`SELECT id,telegram_id,file_id,media_type FROM bella_content WHERE status='pending' ORDER BY id ASC LIMIT 5`;
- if(!items.length){await tg('sendMessage',{chat_id:adminId(),text:'✅ No hay publicaciones pendientes.'});return;}
- await tg('sendMessage',{chat_id:adminId(),text:'📥 Publicaciones pendientes: '+items.length+' (máximo 5 por consulta).'});
+ if(!items.length){await tg('sendMessage',{chat_id:adminId(),text:'✅ No hay publicaciones pendientes.',reply_markup:adminMenu});return;}
+ await tg('sendMessage',{chat_id:adminId(),text:'📥 Publicaciones pendientes: '+items.length+' (máximo 5 por consulta).',reply_markup:adminMenu});
  for(const item of items){
   try{await sendReview({id:item.id,chat:item.telegram_id,type:item.media_type,fileId:item.file_id});}
   catch(e){console.error('pending_delivery_failed',item.id,e.message);await tg('sendMessage',{chat_id:adminId(),text:'⚠️ No se pudo entregar la publicación #'+item.id+'. Está guardada en la base de datos.'});}
@@ -50,7 +52,7 @@ if(cb.startsWith('review_')){
  await tg('answerCallbackQuery',{callback_query_id:u.callback_query.id,text:updated.length?'Decisión registrada':'Ya se había revisado'});
  if(updated.length){
   try{await tg('editMessageReplyMarkup',{chat_id:chat,message_id:m.message_id,reply_markup:{inline_keyboard:[]}});}catch(e){console.warn('edit_review_buttons',e.message);}
-  try{await tg('sendMessage',{chat_id:chat,text:(status==='approved'?'✅ Aprobado':'❌ Rechazado')+' · Publicación #'+contentId});}catch(e){console.warn('admin_confirmation_failed',e.message);}
+  try{await tg('sendMessage',{chat_id:chat,text:(status==='approved'?'✅ Aprobado':'❌ Rechazado')+' · Publicación #'+contentId,reply_markup:adminMenu});}catch(e){console.warn('admin_confirmation_failed',e.message);}
   try{await tg('sendMessage',{chat_id:String(updated[0].telegram_id),text:status==='approved'?'✅ Tu publicación #'+contentId+' fue aprobada.':'❌ Tu publicación #'+contentId+' fue rechazada.'});}catch(e){console.warn('creator_notification_failed',e.message);}
  }
  return res.status(200).json({ok:true});
@@ -60,12 +62,32 @@ if(text==='/miid'||text==='/id'){
  await tg('sendMessage',{chat_id:chat,text:'🪪 Identificación de Telegram\n\nTu ID: '+myId+'\nAcceso administrador: '+(myId===adminId()?'✅ Sí':'❌ No')+'\n\nSi no coincide, el ADMIN_ID de Bella Club debe actualizarse al ID de tu cuenta.'});
  return res.status(200).json({ok:true});
 }
-if(text==='/pendientes'){
- if(String(from.id)!==adminId()){
-   await tg('sendMessage',{chat_id:chat,text:'🔐 Esta cuenta no figura como administradora.\nEnvía /miid para comprobar tu ID de Telegram y corregir el acceso.'});
-   return res.status(200).json({ok:true});
+// El administrador tiene un panel exclusivo; no utiliza el menú de clientes.
+if(isAdmin(from.id)){
+ if(text==='/start'||text==='/admin'||text==='/panel'||text==='🏠 Panel admin'){
+  await tg('sendMessage',{chat_id:chat,text:'🛡️ BELLA CLUB · Panel administrador\n\nAquí recibes y revisas las publicaciones de los usuarios. No necesitas enviar contenido.',reply_markup:adminMenu});
+  return res.status(200).json({ok:true});
  }
- await pendingForAdmin(db);
+ if(text==='/pendientes'||text==='📥 Revisar pendientes'){
+  await pendingForAdmin(db);
+  return res.status(200).json({ok:true});
+ }
+ if(text==='📊 Resumen'){
+  const rows=await db`SELECT status,COUNT(*)::int AS total FROM bella_content GROUP BY status`;
+  const counts=Object.fromEntries(rows.map(r=>[r.status,Number(r.total)]));
+  await tg('sendMessage',{chat_id:chat,text:'📊 BELLA CLUB · Resumen de publicaciones\n\n⏳ Pendientes: '+(counts.pending||0)+'\n✅ Aprobadas: '+(counts.approved||0)+'\n❌ Rechazadas: '+(counts.rejected||0),reply_markup:adminMenu});
+  return res.status(200).json({ok:true});
+ }
+ if(u.callback_query){
+  await tg('answerCallbackQuery',{callback_query_id:u.callback_query.id});
+  await tg('sendMessage',{chat_id:chat,text:'🛡️ Usa tu panel para revisar publicaciones.',reply_markup:adminMenu});
+  return res.status(200).json({ok:true});
+ }
+ await tg('sendMessage',{chat_id:chat,text:u.message?.photo||u.message?.video?'🛡️ Esta cuenta es solo para administrar y revisar fotos y videos de los usuarios.':'🛡️ Selecciona una opción del panel de administrador.',reply_markup:adminMenu});
+ return res.status(200).json({ok:true});
+}
+if(text==='/pendientes'){
+ await tg('sendMessage',{chat_id:chat,text:'🔐 Solo el administrador puede revisar publicaciones. Envía /miid si necesitas comprobar tu ID de Telegram.',reply_markup:menu});
  return res.status(200).json({ok:true});
 }
 
