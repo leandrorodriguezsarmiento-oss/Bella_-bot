@@ -8,6 +8,41 @@ const menu={keyboard:[[{text:'👤 Mi perfil'},{text:'💰 Saldo'}],[{text:'📸
 const adminId=()=>String(process.env.ADMIN_ID||'').trim();
 const isAdmin=id=>String(id||'')===adminId();
 const adminMenu={keyboard:[[{text:'📥 Revisar pendientes'},{text:'📊 Resumen'}],[{text:'🏠 Panel admin'}]],resize_keyboard:true,is_persistent:true,one_time_keyboard:false,input_field_placeholder:'Revisión de publicaciones'};
+
+async function ensureApprovalSchema(db){
+ await db`ALTER TABLE bella_content ADD COLUMN IF NOT EXISTS payout_amount NUMERIC(12,2)`;
+ await db`CREATE TABLE IF NOT EXISTS bella_admin_payment_drafts (admin_id BIGINT PRIMARY KEY, content_id BIGINT NOT NULL, amount NUMERIC(12,2), review_message_id BIGINT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`;
+}
+function parseReais(value){
+ const raw=String(value||'').trim().replace(/^R\$\s*/i,'').replace(/\s/g,'');
+ if(!/^\d{1,5}(?:[.,]\d{1,2})?$/.test(raw))return null;
+ const valueNumber=Number(raw.replace(',','.'));
+ if(!Number.isFinite(valueNumber)||valueNumber<0.01||valueNumber>10000)return null;
+ return Math.round(valueNumber*100);
+}
+const formatReais=cents=>'R$ '+(Number(cents)/100).toFixed(2).replace('.',',');
+function payConfirmKeyboard(contentId,cents){
+ return {inline_keyboard:[
+  [{text:'✅ Confirmar '+formatReais(cents),callback_data:'pay_confirm_'+contentId}],
+  [{text:'✏️ Cambiar importe',callback_data:'pay_edit_'+contentId},{text:'❌ Cancelar',callback_data:'pay_cancel_'+contentId}]
+ ]};
+}
+async function paymentDraft(db,admin){
+ const rows=await db`SELECT content_id,amount,review_message_id FROM bella_admin_payment_drafts WHERE admin_id=${admin} LIMIT 1`;
+ return rows[0]||null;
+}
+async function startApproval(db,admin,contentId,reviewMessageId,chat){
+ await ensureApprovalSchema(db);
+ const pending=await db`SELECT id FROM bella_content WHERE id=${contentId} AND status='pending'`;
+ if(!pending.length){
+  await tg('sendMessage',{chat_id:chat,text:'⚠️ Esta publicación ya fue revisada. No se aplicó ningún pago.',reply_markup:adminMenu});
+  return false;
+ }
+ await db`INSERT INTO bella_admin_payment_drafts(admin_id,content_id,amount,review_message_id,created_at) VALUES(${admin},${contentId},NULL,${reviewMessageId||null},NOW()) ON CONFLICT(admin_id) DO UPDATE SET content_id=EXCLUDED.content_id,amount=NULL,review_message_id=EXCLUDED.review_message_id,created_at=NOW()`;
+ await tg('sendMessage',{chat_id:chat,text:'💵 Publicación #'+contentId+'\\n\\n¿Cuánto quieres abonar al saldo del usuario por aprobarla?\\n\\nEscribe una cantidad en reales (por ejemplo: 5,00 o 12,50).\\n\\nNo se abonará nada hasta que lo confirmes. Para cancelar envía /cancelar.',reply_markup:adminMenu});
+ return true;
+}
+
 const reviewButtons=id=>({inline_keyboard:[[{text:'✅ Aprobar',callback_data:'review_approve_'+id},{text:'❌ Rechazar',callback_data:'review_reject_'+id}]]});
 function reviewCaption({id,chat,username,type,caption}){
  const who=username?'@'+String(username).replace(/[^a-zA-Z0-9_]/g,'').slice(0,60):'Sin usuario público';
@@ -45,23 +80,84 @@ if(cb.startsWith('lang_')){const lang=cb.slice(5);await db`UPDATE bella_users SE
 if(cb==='adult_yes'){await db`UPDATE bella_users SET is_adult=TRUE,state='menu' WHERE telegram_id=${chat}`;await tg('answerCallbackQuery',{callback_query_id:u.callback_query.id});await tg('sendMessage',{chat_id:chat,text:'🔥 BELLA CLUB\n\n✅ Registro completado.\nElige una opción:',reply_markup:menu});return res.status(200).json({ok:true});}
 if(cb==='adult_no'){await tg('answerCallbackQuery',{callback_query_id:u.callback_query.id});await tg('sendMessage',{chat_id:chat,text:'❌ Este servicio es solo para mayores de 18 años.'});return res.status(200).json({ok:true});}
 
+
 if(cb.startsWith('review_')){
  const match=/^review_(approve|reject)_(\d+)$/.exec(cb);
- if(!match||String(from.id)!==adminId()){
+ if(!match||!isAdmin(from.id)){
   await tg('answerCallbackQuery',{callback_query_id:u.callback_query.id,text:'Acceso no autorizado',show_alert:true});
   return res.status(200).json({ok:true});
  }
  const contentId=Number(match[2]);
- const status=match[1]==='approve'?'approved':'rejected';
- const updated=await db`UPDATE bella_content SET status=${status} WHERE id=${contentId} AND status='pending' RETURNING id,telegram_id`;
- await tg('answerCallbackQuery',{callback_query_id:u.callback_query.id,text:updated.length?'Decisión registrada':'Ya se había revisado'});
- if(updated.length){
-  try{await tg('editMessageReplyMarkup',{chat_id:chat,message_id:m.message_id,reply_markup:{inline_keyboard:[]}});}catch(e){console.warn('edit_review_buttons',e.message);}
-  try{await tg('sendMessage',{chat_id:chat,text:(status==='approved'?'✅ Aprobado':'❌ Rechazado')+' · Publicación #'+contentId,reply_markup:adminMenu});}catch(e){console.warn('admin_confirmation_failed',e.message);}
-  try{await tg('sendMessage',{chat_id:String(updated[0].telegram_id),text:status==='approved'?'✅ Tu publicación #'+contentId+' fue aprobada.':'❌ Tu publicación #'+contentId+' fue rechazada.'});}catch(e){console.warn('creator_notification_failed',e.message);}
+ if(match[1]==='approve'){
+  await tg('answerCallbackQuery',{callback_query_id:u.callback_query.id,text:'Introduce la cantidad en reales'});
+  await startApproval(db,from.id,contentId,m?.message_id,chat);
+  return res.status(200).json({ok:true});
+ }
+ const rejected=await db`UPDATE bella_content SET status='rejected' WHERE id=${contentId} AND status='pending' RETURNING id,telegram_id`;
+ await tg('answerCallbackQuery',{callback_query_id:u.callback_query.id,text:rejected.length?'Rechazado':'Ya revisado'});
+ if(rejected.length){
+  try{await tg('editMessageReplyMarkup',{chat_id:chat,message_id:m.message_id,reply_markup:{inline_keyboard:[]}});}catch(e){console.warn('reject_button_clear_failed',e.message);}
+  try{await tg('sendMessage',{chat_id:chat,text:'❌ Rechazado · Publicación #'+contentId,reply_markup:adminMenu});}catch(e){console.warn('reject_admin_ack_failed',e.message);}
+  try{await tg('sendMessage',{chat_id:String(rejected[0].telegram_id),text:'❌ Tu publicación #'+contentId+' fue rechazada.'});}catch(e){console.warn('reject_user_notification_failed',e.message);}
  }
  return res.status(200).json({ok:true});
 }
+if(cb.startsWith('pay_')){
+ const match=/^pay_(confirm|edit|cancel)_(\d+)$/.exec(cb);
+ if(!match||!isAdmin(from.id)){
+  await tg('answerCallbackQuery',{callback_query_id:u.callback_query.id,text:'Acceso no autorizado',show_alert:true});
+  return res.status(200).json({ok:true});
+ }
+ const action=match[1],contentId=Number(match[2]);
+ await ensureApprovalSchema(db);
+ const draft=await paymentDraft(db,from.id);
+ if(!draft||Number(draft.content_id)!==contentId){
+  await tg('answerCallbackQuery',{callback_query_id:u.callback_query.id,text:'Esta confirmación ya no está activa',show_alert:true});
+  return res.status(200).json({ok:true});
+ }
+ if(action==='cancel'){
+  await db`DELETE FROM bella_admin_payment_drafts WHERE admin_id=${from.id} AND content_id=${contentId}`;
+  await tg('answerCallbackQuery',{callback_query_id:u.callback_query.id,text:'Operación cancelada'});
+  await tg('sendMessage',{chat_id:chat,text:'🚫 Cancelado. La publicación #'+contentId+' sigue pendiente y no se modificó ningún saldo.',reply_markup:adminMenu});
+  return res.status(200).json({ok:true});
+ }
+ if(action==='edit'){
+  await db`UPDATE bella_admin_payment_drafts SET amount=NULL WHERE admin_id=${from.id} AND content_id=${contentId}`;
+  await tg('answerCallbackQuery',{callback_query_id:u.callback_query.id,text:'Escribe el nuevo importe'});
+  await tg('sendMessage',{chat_id:chat,text:'✏️ Introduce el nuevo importe en reales para la publicación #'+contentId+'. Ejemplo: 7,50',reply_markup:adminMenu});
+  return res.status(200).json({ok:true});
+ }
+ if(draft.amount===null||draft.amount===undefined){
+  await tg('answerCallbackQuery',{callback_query_id:u.callback_query.id,text:'Introduce primero el importe',show_alert:true});
+  return res.status(200).json({ok:true});
+ }
+ const amount=Number(draft.amount);
+ const cents=Math.round(amount*100);
+ if(!Number.isFinite(cents)||cents<=0||cents>1000000)throw Error('Importe de pago fuera de rango');
+ // Una sola transacción SQL: aprobar y sumar saldo, solo si continúa pendiente.
+ const paid=await db`WITH approved AS (
+   UPDATE bella_content SET status='approved',payout_amount=${amount}
+   WHERE id=${contentId} AND status='pending'
+   RETURNING id,telegram_id
+  ), credited AS (
+   UPDATE bella_users AS u SET balance=u.balance+${amount},updated_at=NOW()
+   FROM approved a WHERE u.telegram_id=a.telegram_id
+   RETURNING u.telegram_id,u.balance
+  )
+  SELECT a.id,a.telegram_id,c.balance FROM approved a INNER JOIN credited c ON c.telegram_id=a.telegram_id`;
+ await db`DELETE FROM bella_admin_payment_drafts WHERE admin_id=${from.id} AND content_id=${contentId}`;
+ await tg('answerCallbackQuery',{callback_query_id:u.callback_query.id,text:paid.length?'Saldo abonado':'Publicación ya revisada'});
+ if(!paid.length){
+  await tg('sendMessage',{chat_id:chat,text:'⚠️ La publicación #'+contentId+' ya estaba revisada. No se duplicó ningún abono.',reply_markup:adminMenu});
+  return res.status(200).json({ok:true});
+ }
+ const balance=Number(paid[0].balance);
+ try{await tg('editMessageReplyMarkup',{chat_id:chat,message_id:Number(draft.review_message_id),reply_markup:{inline_keyboard:[]}});}catch(e){console.warn('approved_button_clear_failed',e.message);}
+ try{await tg('sendMessage',{chat_id:chat,text:'✅ Publicación #'+contentId+' aprobada\\n💵 Abonado al saldo: '+formatReais(cents)+'\\n💰 Nuevo saldo del usuario: '+formatReais(Math.round(balance*100))+'\\n\\nEl PIX se paga manualmente cuando corresponda.',reply_markup:adminMenu});}catch(e){console.warn('approval_admin_ack_failed',e.message);}
+ try{await tg('sendMessage',{chat_id:String(paid[0].telegram_id),text:'✅ Tu publicación #'+contentId+' fue aprobada.\\n💵 Se añadieron '+formatReais(cents)+' a tu saldo.\\n💰 Saldo actual: '+formatReais(Math.round(balance*100))+'\\n\\nPuedes consultar tu saldo y solicitar retiro PIX cuando alcances R$ 20,00.'});}catch(e){console.warn('approval_creator_notice_failed',e.message);}
+ return res.status(200).json({ok:true});
+}
+
 if(text==='/miid'||text==='/id'){
  const myId=String(from.id||chat);
  await tg('sendMessage',{chat_id:chat,text:'🪪 Identificación de Telegram\n\nTu ID: '+myId+'\nAcceso administrador: '+(myId===adminId()?'✅ Sí':'❌ No')+'\n\nSi no coincide, el ADMIN_ID de Bella Club debe actualizarse al ID de tu cuenta.'});
@@ -69,6 +165,26 @@ if(text==='/miid'||text==='/id'){
 }
 // El administrador tiene un panel exclusivo; no utiliza el menú de clientes.
 if(isAdmin(from.id)){
+ if(text==='/cancelar'){
+  await ensureApprovalSchema(db);
+  await db`DELETE FROM bella_admin_payment_drafts WHERE admin_id=${from.id}`;
+  await tg('sendMessage',{chat_id:chat,text:'🚫 Operación cancelada. No se ha abonado ningún importe.',reply_markup:adminMenu});
+  return res.status(200).json({ok:true});
+ }
+ if(u.message?.text && !['/start','/admin','/panel','/pendientes','/miid','/id','🏠 Panel admin','📥 Revisar pendientes','📊 Resumen'].includes(text)){
+  await ensureApprovalSchema(db);
+  const draft=await paymentDraft(db,from.id);
+  if(draft){
+   const cents=parseReais(text);
+   if(cents===null){
+    await tg('sendMessage',{chat_id:chat,text:'⚠️ Cantidad no válida. Escribe un importe entre R$ 0,01 y R$ 10.000,00. Ejemplo: 8,50\\nO envía /cancelar.',reply_markup:adminMenu});
+    return res.status(200).json({ok:true});
+   }
+   await db`UPDATE bella_admin_payment_drafts SET amount=${(cents/100).toFixed(2)} WHERE admin_id=${from.id} AND content_id=${draft.content_id}`;
+   await tg('sendMessage',{chat_id:chat,text:'🧾 Confirma el abono:\\n\\n📸 Publicación #'+draft.content_id+'\\n💵 A sumar al saldo: '+formatReais(cents)+'\\n\\nSolo se abonará cuando pulses Confirmar.',reply_markup:payConfirmKeyboard(draft.content_id,cents)});
+   return res.status(200).json({ok:true});
+  }
+ }
  if(text==='/start'||text==='/admin'||text==='/panel'||text==='🏠 Panel admin'){
   await tg('sendMessage',{chat_id:chat,text:'🛡️ BELLA CLUB · Panel administrador\n\nAquí recibes y revisas las publicaciones de los usuarios. No necesitas enviar contenido.',reply_markup:adminMenu});
   return res.status(200).json({ok:true});
