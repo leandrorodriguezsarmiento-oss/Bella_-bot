@@ -49,7 +49,7 @@ function reviewCaption({id,chat,username,type,caption}){
  const who=username?'@'+String(username).replace(/[^a-zA-Z0-9_]/g,'').slice(0,60):'Sin usuario público';
  return ('📥 BELLA CLUB · Publicación #'+id+'\n👤 '+who+'\n🆔 '+chat+'\n📎 '+(type==='video'?'Video':'Foto')+'\n\n'+String(caption||'').slice(0,500)).slice(0,1000);
 }
-async function sendReview({id,chat,username,type,caption,messageId,fileId}){
+async function sendReview({id,chat,username,type,caption,messageId,fileId,asDocument=false}){
  if(!/^\d+$/.test(adminId()))throw new Error('ADMIN_ID no configurado');
  const label=reviewCaption({id,chat,username,type,caption});
  const reply_markup=reviewButtons(id);
@@ -57,16 +57,17 @@ async function sendReview({id,chat,username,type,caption,messageId,fileId}){
   try{return await tg('copyMessage',{chat_id:adminId(),from_chat_id:chat,message_id:messageId,caption:label,reply_markup});}
   catch(e){console.warn('copy_to_admin_failed',id,e.message);}
  }
- const mediaMethod=type==='video'?'sendVideo':'sendPhoto';
- const mediaKey=type==='video'?'video':'photo';
+ const mediaMethod=asDocument?'sendDocument':(type==='video'?'sendVideo':'sendPhoto');
+ const mediaKey=asDocument?'document':(type==='video'?'video':'photo');
  return await tg(mediaMethod,{chat_id:adminId(),[mediaKey]:fileId,caption:label,reply_markup});
 }
 async function pendingForAdmin(db){
- const items=await db`SELECT id,telegram_id,file_id,media_type FROM bella_content WHERE status='pending' ORDER BY id ASC LIMIT 5`;
+ await db`ALTER TABLE bella_content ADD COLUMN IF NOT EXISTS web_send_method TEXT`;
+ const items=await db`SELECT id,telegram_id,file_id,media_type,web_send_method FROM bella_content WHERE status='pending' ORDER BY id ASC LIMIT 5`;
  if(!items.length){await tg('sendMessage',{chat_id:adminId(),text:'✅ No hay publicaciones pendientes.',reply_markup:adminMenu});return;}
  await tg('sendMessage',{chat_id:adminId(),text:'📥 Publicaciones pendientes: '+items.length+' (máximo 5 por consulta).',reply_markup:adminMenu});
  for(const item of items){
-  try{await sendReview({id:item.id,chat:item.telegram_id,type:item.media_type,fileId:item.file_id});}
+  try{await sendReview({id:item.id,chat:item.telegram_id,type:item.media_type,fileId:item.file_id,asDocument:item.web_send_method==='document'});}
   catch(e){console.error('pending_delivery_failed',item.id,e.message);await tg('sendMessage',{chat_id:adminId(),text:'⚠️ No se pudo entregar la publicación #'+item.id+'. Está guardada en la base de datos.'});}
  }
 }
@@ -82,6 +83,22 @@ export default async function handler(req,res){
 if(text==='/mayor18'&&isAdmin(from.id)&&String(m?.chat?.type)==='private'){
  await db`UPDATE bella_users SET is_adult=TRUE,updated_at=NOW() WHERE telegram_id=${from.id}`;
  await tg('sendMessage',{chat_id:chat,text:'✅ Confirmada la mayoría de edad. Puedes usar Bella Club web.'});return res.json({ok:true});
+}
+// One-tap Telegram deep link for Bella Club web. Only private chats may link.
+const fromWeb=/^\/start(?:@\w+)?\s+web_([a-f0-9]{12})$/i.exec(text.trim());
+if(fromWeb){
+ if(String(m?.chat?.type)!=='private'||String(chat)!==String(from.id)){await tg('sendMessage',{chat_id:chat,text:'🔐 Abre el enlace en un chat privado con este bot.'});return res.json({ok:true})}
+ const code=fromWeb[1].toUpperCase();
+ const current=await db`SELECT is_adult FROM bella_users WHERE telegram_id=${from.id}`;
+ if(!current[0]?.is_adult){
+  await db`UPDATE bella_users SET state=${'await_web_'+code} WHERE telegram_id=${from.id}`;
+  await tg('sendMessage',{chat_id:chat,text:'🔞 Bella Club es exclusivo para mayores de 18 años. ¿Confirmas que tienes 18 o más?',reply_markup:{inline_keyboard:[[{text:'✅ Sí, tengo +18',callback_data:'adult_yes'},{text:'❌ No',callback_data:'adult_no'}]]}});
+  return res.json({ok:true});
+ }
+ const digest=createHash('sha256').update(code).digest('hex');
+ const found=await db`UPDATE bella_web_links SET telegram_id=${from.id} WHERE code_hash=${digest} AND telegram_id IS NULL AND expires_at>NOW() RETURNING id`;
+ await tg('sendMessage',{chat_id:chat,text:found.length?'✅ Cuenta vinculada. Regresa a la página web y pulsa «Ya lo hice».':'⚠️ El enlace caducó o ya se usó. Solicita uno nuevo.'});
+ return res.json({ok:true});
 }
 const connect=/^\/vincular(?:@\w+)?\s+([a-f0-9]{12})$/i.exec(text.trim());
 if(connect){
@@ -110,13 +127,25 @@ if(isAdmin(from.id)&&(text==='/retirosweb'||text==='💸 Retiros web')){
  for(const x of pending)await tg('sendMessage',{chat_id:chat,text:'💸 PIX #'+x.id+'\nUsuario: '+x.telegram_id+'\nImporte: R$ '+Number(x.amount).toFixed(2)+'\nClave: '+x.pix_key+'\nPaga manualmente antes de confirmar.',reply_markup:{inline_keyboard:[[{text:'✅ Marcar pagado',callback_data:'webwd_paid_'+x.id},{text:'❌ Rechazar y devolver',callback_data:'webwd_reject_'+x.id}]]}});
  return res.json({ok:true});
 }
-if(isAdmin(from.id)&&(cb.startsWith('lang_')||cb==='adult_yes'||cb==='adult_no')){
+if(isAdmin(from.id)&&cb.startsWith('lang_')){
  await tg('answerCallbackQuery',{callback_query_id:u.callback_query.id,text:'Usa el panel administrador.'});
  await tg('sendMessage',{chat_id:chat,text:'🛡️ BELLA CLUB · Panel administrador',reply_markup:adminMenu});
  return res.status(200).json({ok:true});
 }
 if(cb.startsWith('lang_')){const lang=cb.slice(5);await db`UPDATE bella_users SET language=${lang} WHERE telegram_id=${chat}`;await tg('answerCallbackQuery',{callback_query_id:u.callback_query.id});await tg('sendMessage',{chat_id:chat,text:'🔞 Bella Club es solo para mayores de 18 años.\n\n¿Confirmas que tienes 18 años o más?',reply_markup:{inline_keyboard:[[{text:'✅ Sí, soy +18',callback_data:'adult_yes'},{text:'❌ No',callback_data:'adult_no'}]]}});return res.status(200).json({ok:true});}
-if(cb==='adult_yes'){await db`UPDATE bella_users SET is_adult=TRUE,state='menu' WHERE telegram_id=${chat}`;await tg('answerCallbackQuery',{callback_query_id:u.callback_query.id});await tg('sendMessage',{chat_id:chat,text:'🔥 BELLA CLUB\n\n✅ Registro completado.\nElige una opción:',reply_markup:menu});return res.status(200).json({ok:true});}
+if(cb==='adult_yes'){
+ const old=await db`SELECT state FROM bella_users WHERE telegram_id=${chat}`;
+ await db`UPDATE bella_users SET is_adult=TRUE,state='menu' WHERE telegram_id=${chat}`;
+ await tg('answerCallbackQuery',{callback_query_id:u.callback_query.id});
+ const pending=/^await_web_([A-F0-9]{12})$/.exec(old[0]?.state||'');
+ if(pending){
+  const digest=createHash('sha256').update(pending[1]).digest('hex');
+  const linked=await db`UPDATE bella_web_links SET telegram_id=${from.id} WHERE code_hash=${digest} AND telegram_id IS NULL AND expires_at>NOW() RETURNING id`;
+  await tg('sendMessage',{chat_id:chat,text:linked.length?'✅ Registro +18 y vinculación completados. Vuelve al navegador y pulsa «Ya lo hice».':'✅ Registro +18 completado. El código web venció; genera otro.',reply_markup:menu});
+  return res.json({ok:true});
+ }
+ await tg('sendMessage',{chat_id:chat,text:'🔥 BELLA CLUB\n\n✅ Registro completado.\nElige una opción:',reply_markup:menu});return res.json({ok:true});
+}
 if(cb==='adult_no'){await tg('answerCallbackQuery',{callback_query_id:u.callback_query.id});await tg('sendMessage',{chat_id:chat,text:'❌ Este servicio es solo para mayores de 18 años.'});return res.status(200).json({ok:true});}
 
 
