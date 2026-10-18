@@ -10,7 +10,7 @@ const app=document.getElementById('app');
 const fmt=n=>new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL'}).format(Number(n)||0);
 const esc=v=>String(v==null?'':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const sid=()=>crypto.randomUUID().replace(/-/g,'');
-let token=sessionStorage.getItem('bella_web_session')||'',link=null,profile=null,history={posts:[],withdrawals:[]},tab='home',busy=false,uploadedPhoto=null,uploadKey=sid(),withdrawKey=sid(),adminData=null;
+let token=sessionStorage.getItem('bella_web_session')||'',link=JSON.parse(sessionStorage.getItem('bella_pending_link')||'null'),profile=null,history={posts:[],withdrawals:[]},tab='home',busy=false,uploadedPhoto=null,uploadKey=sid(),withdrawKey=sid(),adminData=null,botUsername=sessionStorage.getItem('bella_bot_username')||'';
 const el=(id)=>document.getElementById(id);
 function alertBox(message){const t=el('toast');t.textContent=message;t.style.display='block';clearTimeout(alertBox.timer);alertBox.timer=setTimeout(()=>t.style.display='none',6000)}
 async function api(action,method='GET',payload){
@@ -31,7 +31,7 @@ function render(){
  const nav=[['home','⌂','Inicio'],['upload','＋','Publicar'],['wallet','＄','Mi saldo'],['history','≡','Historial']];if(profile.admin)nav.push(['admin','⚙','Admin']);
  let html='';
  if(tab==='home')html='<section class="hero"><div class="eyebrow">TU ESPACIO · BELLA CLUB</div><h1>Hola, '+esc(profile.name)+' ✦</h1><p class="lead">Tus publicaciones, ganancias y solicitudes PIX, sincronizadas con el bot de Telegram.</p><div class="btnrow"><button class="btn" data-action="go-upload">＋ Enviar foto</button><button class="btn secondary" data-action="refresh">↻ Actualizar</button></div></section><div class="grid"><div class="stat"><span>💰 Saldo disponible</span><strong>'+fmt(profile.balance)+'</strong></div><div class="stat"><span>🔒 Saldo reservado</span><strong>'+fmt(profile.reserved)+'</strong></div></div><div class="card"><h2>Publicaciones recientes</h2>'+rows(history.posts.slice(0,4),'post')+'</div>';
- if(tab==='upload')html='<h1>📸 Enviar contenido</h1><p class="lead">Las fotos se envían a revisión del administrador. El pago se suma al saldo solamente al aprobarse.</p><div class="card"><h2>Nueva publicación</h2><p class="muted small">Selecciona una imagen JPEG, PNG o WEBP. La ajustaremos si pesa demasiado. Videos: por ahora desde Telegram.</p><label class="field" for="photo">Selecciona una foto</label><input id="photo" class="input" type="file" accept="image/jpeg,image/png,image/webp,image/*"><img id="preview" class="photoPreview hidden" alt="Vista previa de la foto"><button class="btn block" data-action="upload" style="margin-top:14px">Enviar a revisión</button></div><div class="card"><h2>Mis publicaciones</h2>'+rows(history.posts,'post')+'</div>';
+ if(tab==='upload')html='<h1>📸 Enviar contenido</h1><p class="lead">Las fotos y videos se envían a revisión del administrador. El pago se suma al saldo solamente al aprobarse.</p><div class="card"><h2>Nueva publicación</h2><p class="muted small">Fotos JPG/PNG/WEBP y videos MP4/MOV/WEBM pequeños (máximo 2,7 MB). Para videos grandes envíalos directamente al bot de Telegram.</p><label class="field" for="photo">Selecciona una foto o video</label><input id="photo" class="input" type="file" accept="image/*,video/mp4,video/quicktime,video/webm,.mov,.mp4,.webm"><img id="preview" class="photoPreview hidden" alt="Vista previa de la foto"><video id="videoPreview" controls playsinline class="photoPreview hidden"></video><button class="btn block" data-action="upload" style="margin-top:14px">Enviar a revisión</button></div><div class="card"><h2>Mis publicaciones</h2>'+rows(history.posts,'post')+'</div>';
  if(tab==='wallet')html='<h1>💰 Mi saldo</h1><p class="lead">Este saldo es el mismo que aparece en tu cuenta de Telegram.</p><div class="grid"><div class="stat"><span>Disponible</span><strong>'+fmt(profile.balance)+'</strong></div><div class="stat"><span>Reservado</span><strong>'+fmt(profile.reserved)+'</strong></div></div><div class="card"><h2>Solicitar retiro PIX</h2><p class="muted small">Mínimo R$ 20. El importe queda reservado mientras se revisa. La transferencia se hace manualmente.</p><label class="field" for="amount">Importe en reales (R$)</label><input class="input" id="amount" type="text" inputmode="decimal" placeholder="20,00" autocomplete="off"><label class="field" for="pix">Tu clave PIX</label><input class="input" id="pix" type="text" placeholder="CPF, correo, teléfono o clave aleatoria" autocomplete="off"><button class="btn block" data-action="withdraw" style="margin-top:16px">Solicitar retiro PIX</button></div><div class="card"><h2>Mis retiros</h2>'+rows(history.withdrawals,'withdraw')+'</div>';
  if(tab==='history')html='<h1>📜 Mi historial</h1><p class="lead">Movimientos registrados en la misma base de datos que el bot.</p><div class="card"><h2>Publicaciones</h2>'+rows(history.posts,'post')+'</div><div class="card"><h2>Retiros PIX</h2>'+rows(history.withdrawals,'withdraw')+'</div>';
  if(tab==='admin'){const a=adminData;html='<h1>🛡 Panel administrador</h1><p class="lead">Aprueba publicaciones y confirma pagos desde Telegram. Aquí puedes consultar un resumen.</p><div class="card"><h2>Publicaciones</h2>'+(a?.counts?.length?a.counts.map(x=>'<div class="item"><strong>'+esc(status(x.status))+'</strong><strong>'+esc(x.n)+'</strong></div>').join(''):'<p class="muted">Sin datos disponibles.</p>')+'</div><div class="card"><h2>Retiros PIX pendientes</h2>'+(a?.pending?.length?a.pending.map(x=>'<div class="item"><div><strong>#'+esc(x.id)+' · '+fmt(x.amount)+'</strong><div class="small muted">Usuario '+esc(x.telegram_id)+' · PIX: '+esc(x.pix_key)+'</div></div>'+badge('pending')+'</div>').join(''):'<p class="muted">No hay retiros pendientes.</p>')+'</div>'}
@@ -40,11 +40,17 @@ function render(){
 }
 function renderConnect(){
  let html='<section class="hero"><div class="eyebrow">BIENVENIDO A BELLA CLUB</div><h1>Tu club, en el navegador.</h1><p class="lead">Abre tus publicaciones, consulta tu saldo real y solicita retiros PIX usando tu cuenta del bot de Telegram.</p></section><div class="steps"><div class="step"><span>1</span><strong>Abre Bella Club</strong><p>En Telegram, completa tu registro y confirmación +18 con /start.</p></div><div class="step"><span>2</span><strong>Vincula tu cuenta</strong><p>Genera un código aquí y envíalo al bot en un chat privado.</p></div><div class="step"><span>3</span><strong>Entra a tu perfil</strong><p>Verás exactamente tus datos actuales del bot.</p></div></div><div class="card"><h2>🔐 Conectar con Telegram</h2><p class="muted">Solo las cuentas mayores de 18 años pueden acceder. No necesitas crear otra contraseña.</p>';
- if(link)html+='<p class="small muted">Copia y envía este comando al bot de Bella Club por Telegram:</p><div class="code" id="code">'+esc('/vincular '+link.code)+'</div><div class="btnrow"><button class="btn secondary" data-action="copy">Copiar comando</button><button class="btn" data-action="verify">Ya envié el código</button></div><p class="muted small">El código vence en 10 minutos. Si caduca, genera otro.</p><button class="btn ghost block" data-action="begin">Generar nuevo código</button>';
+ if(link)html+='<p class="small muted">'+(link.botUsername?'Abre Telegram con este botón, pulsa Iniciar y confirma que eres +18:':'Copia y envía este comando al bot de Bella Club por Telegram:')+'</p>'+(link.botUsername?'<a class="btn block" style="display:block;text-align:center;text-decoration:none;margin:10px 0" href="https://t.me/'+esc(link.botUsername)+'?start=web_'+esc(link.code)+'" target="_blank" rel="noopener noreferrer">✈ Abrir Telegram y vincular</a>':'')+'<div class="code" id="code">'+esc('/vincular '+link.code)+'</div><div class="btnrow"><button class="btn secondary" data-action="copy">Copiar comando</button><button class="btn" data-action="verify">Ya lo hice · Entrar</button></div><p class="muted small">Solo tendrás que vincular este teléfono una vez. El código caduca en 10 minutos. Si caduca, genera otro.</p><button class="btn ghost block" data-action="begin">Generar nuevo código</button>';
  else html+='<button class="btn block" data-action="begin">Vincular mi Telegram</button>';
  html+='</div>';app.innerHTML=html;
 }
-async function chosenPhoto(f){
+async function chosenMedia(f){
+ if(f&&(/^video\/(mp4|webm|quicktime)$/.test(f.type)||/\.(mp4|mov|webm)$/i.test(f.name))){
+  const type=f.type||(/\.mov$/i.test(f.name)?'video/quicktime':/\.webm$/i.test(f.name)?'video/webm':'video/mp4');
+  if(f.size>2700000)throw Error('Este video supera 2,7 MB. Para videos más grandes, envíalo al bot de Telegram.');
+  const encoded=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=reject;reader.readAsDataURL(f)});
+  return {base64:String(encoded).split(',')[1],mime:type,preview:encoded,isVideo:true};
+ }
  if(!f)return null;
  if(!/^image\/(jpeg|png|webp)$/.test(f.type))throw Error('Elige una foto JPG, PNG o WEBP');
  const url=URL.createObjectURL(f);
@@ -56,24 +62,24 @@ async function chosenPhoto(f){
   let quality=.85,data='';
   do{data=canvas.toDataURL('image/jpeg',quality).split(',')[1];quality-=.12}while(data.length>1950000&&quality>=.34);
   if(data.length>1950000)throw Error('La imagen sigue siendo muy grande');
-  return {base64:data,mime:'image/jpeg',preview:canvas.toDataURL('image/jpeg',.7)};
+  return {base64:data,mime:'image/jpeg',preview:canvas.toDataURL('image/jpeg',.7),isVideo:false};
  }finally{URL.revokeObjectURL(url)}
 }
-app.addEventListener('change',async e=>{if(e.target.id==='photo'){try{uploadedPhoto=await chosenPhoto(e.target.files[0]);uploadKey=sid();if(uploadedPhoto){el('preview').src=uploadedPhoto.preview;el('preview').classList.remove('hidden')}}catch(x){alertBox(x.message)}}});
+app.addEventListener('change',async e=>{if(e.target.id==='photo'){try{uploadedPhoto=await chosenMedia(e.target.files[0]);uploadKey=sid();if(uploadedPhoto){const img=el('preview'),v=el('videoPreview');img.classList.toggle('hidden',uploadedPhoto.isVideo);v.classList.toggle('hidden',!uploadedPhoto.isVideo);if(uploadedPhoto.isVideo){v.src=uploadedPhoto.preview;img.removeAttribute('src')}else{img.src=uploadedPhoto.preview;v.removeAttribute('src')}}}catch(x){alertBox(x.message)}}});
 app.addEventListener('click',async e=>{
  const b=e.target.closest('button[data-action]');if(!b||busy)return;const action=b.dataset.action;
  try{
   if(action==='tab'){tab=b.dataset.tab;adminData=null;await refresh();return}
   if(action==='go-upload'){tab='upload';render();return}
   if(action==='copy'){await navigator.clipboard.writeText('/vincular '+link.code);alertBox('Código copiado');return}
-  if(action==='begin'){loading(true);link=await api('start','POST',{});renderConnect();return}
-  if(action==='verify'){loading(true);const out=await api('link','POST',{pairId:link.pairId,pollSecret:link.pollSecret});if(!out.linked){alertBox('Todavía no está vinculado. Envía el comando a tu bot y vuelve aquí.');return}token=out.session;sessionStorage.setItem('bella_web_session',token);link=null;await refresh();alertBox('✅ Cuenta conectada a Telegram');return}
+  if(action==='begin'){loading(true);link=await api('start','POST',{});sessionStorage.setItem('bella_pending_link',JSON.stringify(link));if(link.botUsername){botUsername=link.botUsername;sessionStorage.setItem('bella_bot_username',botUsername)}renderConnect();return}
+  if(action==='verify'){loading(true);const out=await api('link','POST',{pairId:link.pairId,pollSecret:link.pollSecret});if(!out.linked){alertBox('Todavía no está vinculado. Envía el comando a tu bot y vuelve aquí.');return}token=out.session||'cookie';if(out.session)sessionStorage.setItem('bella_web_session',token);else sessionStorage.removeItem('bella_web_session');link=null;sessionStorage.removeItem('bella_pending_link');await refresh();alertBox('✅ Cuenta conectada a Telegram');return}
   if(action==='refresh'){loading(true);await refresh();alertBox('Datos actualizados');return}
-  if(action==='upload'){if(!uploadedPhoto)throw Error('Primero selecciona una imagen');loading(true);const x=await api('upload','POST',{base64:uploadedPhoto.base64,mime:uploadedPhoto.mime,requestKey:uploadKey});uploadedPhoto=null;uploadKey=sid();tab='upload';await refresh();alertBox('✅ Publicación #'+x.id+' enviada a revisión');return}
+  if(action==='upload'){if(!uploadedPhoto)throw Error('Primero selecciona una foto o video');loading(true);const x=await api('upload','POST',{base64:uploadedPhoto.base64,mime:uploadedPhoto.mime,requestKey:uploadKey});uploadedPhoto=null;uploadKey=sid();tab='upload';await refresh();alertBox('✅ '+(x.mediaType==='video'?'Video':'Foto')+' #'+x.id+' enviado a revisión');return}
   if(action==='withdraw'){const amount=el('amount').value.trim(),pix=el('pix').value.trim();if(!amount||!pix)throw Error('Completa el importe y tu PIX');if(!confirm('¿Solicitar retiro de R$ '+amount+' a la clave PIX indicada?'))return;loading(true);const x=await api('withdraw','POST',{amount,pix,requestKey:withdrawKey});withdrawKey=sid();await refresh();alertBox('✅ Retiro #'+x.id+' solicitado');return}
   if(action==='logout'){loading(true);await api('logout','POST',{});token='';profile=null;link=null;sessionStorage.removeItem('bella_web_session');renderConnect();return}
  }catch(x){alertBox(x.message||'No se pudo completar')}finally{loading(false)}
 });
-if(token)refresh().catch(e=>{alertBox(e.message);render()});else renderConnect();
+refresh().catch(e=>{if(token)alertBox(e.message);renderConnect()});
 })();
 </script></body></html>
