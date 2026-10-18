@@ -29,11 +29,12 @@ async function telegram(method,body){
  const j=await r.json();if(!j.ok)throw Error('Error Telegram');return j.result;
 }
 export default async function handler(req,res){
- res.setHeader('Cache-Control','no-store');res.setHeader('X-Content-Type-Options','nosniff');
+ res.setHeader('Cache-Control','no-store');res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Vary','Cookie');
  const action=String(req.query?.action||'');
  try{
   if(!process.env.DATABASE_URL)return err(res,503,'Base de datos sin configurar');
   if(!['GET','POST'].includes(req.method))return err(res,405,'Método no permitido');
+  if(req.method==='POST'&&req.headers.origin){let incoming;try{incoming=new URL(req.headers.origin)}catch{return err(res,403,'Origen no autorizado')};if(incoming.host!==req.headers.host||incoming.protocol!=='https:')return err(res,403,'Origen no autorizado')}
   const db=neon(process.env.DATABASE_URL);await ready(db);
   const q=(s,...values)=>db.query(s,values);
   if(req.method==='POST'&&action==='start'){
@@ -57,11 +58,14 @@ export default async function handler(req,res){
    if(!taken.length)return err(res,409,'Código ya usado');
    const session=secret(32);
    await q("INSERT INTO bella_web_sessions(token_hash,telegram_id,expires_at) VALUES($1,$2,NOW()+INTERVAL '30 days')",hash(session),taken[0].telegram_id);
-   return res.json({ok:true,linked:true,session});
+   res.setHeader('Set-Cookie','bella_session='+session+'; Path=/; Max-Age=2592000; Secure; HttpOnly; SameSite=Lax');
+   return res.json({ok:true,linked:true});
   }
   const auth=/^Bearer ([A-Za-z0-9_-]{32,180})$/.exec(String(req.headers.authorization||''));
-  if(!auth)return err(res,401,'Vincula tu Telegram');
-  const sessions=await q('SELECT u.telegram_id,u.first_name,u.username,u.language,u.is_adult,u.balance,u.reserved_balance,s.id AS session_id FROM bella_web_sessions s JOIN bella_users u ON u.telegram_id=s.telegram_id WHERE s.token_hash=$1 AND s.expires_at>NOW() AND s.revoked_at IS NULL',hash(auth[1]));
+  const cookie=/(?:^|;\s*)bella_session=([A-Za-z0-9_-]{32,180})(?:;|$)/.exec(String(req.headers.cookie||''));
+  const presented=auth?.[1]||cookie?.[1];
+  if(!presented)return err(res,401,'Vincula tu Telegram');
+  const sessions=await q('SELECT u.telegram_id,u.first_name,u.username,u.language,u.is_adult,u.balance,u.reserved_balance,s.id AS session_id FROM bella_web_sessions s JOIN bella_users u ON u.telegram_id=s.telegram_id WHERE s.token_hash=$1 AND s.expires_at>NOW() AND s.revoked_at IS NULL',hash(presented));
   const u=sessions[0];if(!u)return err(res,401,'Sesión vencida');if(!u.is_adult)return err(res,403,'Solo +18');
   if(req.method==='GET'&&action==='me')return res.json({ok:true,user:{id:String(u.telegram_id),name:u.first_name||u.username||'Usuario',username:u.username||'',language:u.language,balance:Number(u.balance),reserved:Number(u.reserved_balance),admin:admin()===String(u.telegram_id)}});
   if(req.method==='GET'&&action==='history'){
@@ -118,7 +122,7 @@ export default async function handler(req,res){
    const pending=await q("SELECT id,amount,telegram_id,pix_key FROM bella_withdrawals WHERE status='pending' ORDER BY id DESC LIMIT 25");
    return res.json({ok:true,counts,pending:pending.map(w=>({...w,id:Number(w.id),amount:Number(w.amount),telegram_id:String(w.telegram_id)}))});
   }
-  if(req.method==='POST'&&action==='logout'){await q('UPDATE bella_web_sessions SET revoked_at=NOW() WHERE id=$1',u.session_id);return res.json({ok:true})}
+  if(req.method==='POST'&&action==='logout'){await q('UPDATE bella_web_sessions SET revoked_at=NOW() WHERE id=$1',u.session_id);res.setHeader('Set-Cookie','bella_session=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax');return res.json({ok:true})}
   return err(res,404,'Ruta no encontrada');
  }catch(e){console.error('Bella web',action,e?.message||e);return err(res,500,'No se pudo completar la operación')}
 }
