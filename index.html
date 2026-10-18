@@ -24,7 +24,7 @@ const status=s=>({approved:'Aprobado',pending:'Pendiente',rejected:'Rechazado',p
 function badge(s){return '<span class="status '+esc(s)+'">'+esc(status(s))+'</span>'}
 function rows(items,kind){return items.length?items.map(v=>'<div class="item"><div><strong>'+ (kind==='post'?'📸 Publicación #':'💸 PIX #')+esc(v.id)+'</strong><div class="small muted">'+esc(new Date(v.created_at).toLocaleDateString('es'))+(kind==='post'?(v.payout_amount!=null?' · '+fmt(v.payout_amount):' · '+esc(v.media_type)):' · '+fmt(v.amount))+'</div></div>'+badge(v.status)+'</div>').join(''):'<p class="muted">Todavía no hay movimientos.</p>'}
 function loading(s){busy=s;document.querySelectorAll('button[data-action]').forEach(b=>b.disabled=s)}
-async function refresh(){const [p,h]=await Promise.all([api('me'),api('history')]);profile=p.user;history=h;if(tab==='admin'&&profile.admin){try{adminData=await api('admin')}catch{adminData=null}}render()}
+async function refresh(){const [p,h]=await Promise.all([api('me'),api('history')]);profile=p.user;history=h;if(!token)token='cookie';if(tab==='admin'&&profile.admin){try{adminData=await api('admin')}catch{adminData=null}}render()}
 function render(){
  if(!token)return renderConnect();
  if(!profile){app.innerHTML='<p class="muted">Cargando tus datos…</p>';return}
