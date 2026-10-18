@@ -13,6 +13,7 @@ const schema=[
 "CREATE TABLE IF NOT EXISTS bella_withdrawals(id BIGSERIAL PRIMARY KEY,telegram_id BIGINT REFERENCES bella_users(telegram_id),amount NUMERIC(12,2) NOT NULL,pix_key TEXT,status TEXT DEFAULT 'pending',created_at TIMESTAMPTZ DEFAULT NOW())",
 "ALTER TABLE bella_content ADD COLUMN IF NOT EXISTS payout_amount NUMERIC(12,2)",
 "ALTER TABLE bella_content ADD COLUMN IF NOT EXISTS web_request_key TEXT",
+"ALTER TABLE bella_content ADD COLUMN IF NOT EXISTS web_send_method TEXT",
 "CREATE UNIQUE INDEX IF NOT EXISTS bella_content_web_once ON bella_content(telegram_id,web_request_key) WHERE web_request_key IS NOT NULL",
 "ALTER TABLE bella_withdrawals ADD COLUMN IF NOT EXISTS web_request_key TEXT",
 "CREATE UNIQUE INDEX IF NOT EXISTS bella_withdrawals_web_once ON bella_withdrawals(telegram_id,web_request_key) WHERE web_request_key IS NOT NULL",
@@ -41,7 +42,8 @@ export default async function handler(req,res){
    if(Number(count[0]?.n||0)>=8)return err(res,429,'Demasiados intentos. Prueba después');
    const id=secret(18),poll=secret(32),code=randomBytes(6).toString('hex').toUpperCase();
    await q("INSERT INTO bella_web_links(id,code_hash,poll_hash,ip_hash,expires_at) VALUES($1,$2,$3,$4,NOW()+INTERVAL '10 minutes')",id,hash(code),hash(poll),ipHash);
-   return res.json({ok:true,pairId:id,pollSecret:poll,code});
+   let botUsername=null;try{const identity=await telegram('getMe',{});if(/^[a-zA-Z0-9_]{5,32}$/.test(identity?.username||''))botUsername=identity.username}catch(e){console.warn('Bot username lookup unavailable')}
+   return res.json({ok:true,pairId:id,pollSecret:poll,code,botUsername});
   }
   if(req.method==='POST'&&action==='link'){
    const {pairId,pollSecret}=req.body||{};
@@ -81,19 +83,34 @@ export default async function handler(req,res){
   }
   if(req.method==='POST'&&action==='upload'){
    const {base64,mime,requestKey}=req.body||{};
-   if(typeof base64!=='string'||base64.length>2050000||!['image/jpeg','image/png','image/webp'].includes(mime)||!allowed(requestKey)||!/^[A-Za-z0-9+/=]+$/.test(base64))return err(res,400,'Foto demasiado grande o inválida');
-   const bytes=Buffer.from(base64,'base64'),jpg=bytes[0]===255&&bytes[1]===216&&bytes[2]===255,png=bytes[0]===137&&bytes[1]===80&&bytes[2]===78&&bytes[3]===71,webp=bytes.toString('ascii',0,4)==='RIFF'&&bytes.toString('ascii',8,12)==='WEBP';
-   if(bytes.length<100||bytes.length>1500000||!(mime==='image/jpeg'&&jpg||mime==='image/png'&&png||mime==='image/webp'&&webp))return err(res,400,'Imagen inválida (máximo 1,5 MB)');
+   const images=['image/jpeg','image/png','image/webp'];
+   const videos=['video/mp4','video/quicktime','video/webm'];
+   const isVideo=videos.includes(mime);
+   if(typeof base64!=='string'||base64.length>(isVideo?3740000:2050000)||!([...images,...videos].includes(mime))||!allowed(requestKey)||!/^[A-Za-z0-9+/=]+$/.test(base64))return err(res,400,'Formato no admitido o archivo demasiado grande');
+   const bytes=Buffer.from(base64,'base64');
+   const jpg=bytes[0]===255&&bytes[1]===216&&bytes[2]===255;
+   const png=bytes[0]===137&&bytes[1]===80&&bytes[2]===78&&bytes[3]===71;
+   const webp=bytes.toString('ascii',0,4)==='RIFF'&&bytes.toString('ascii',8,12)==='WEBP';
+   const mp4=bytes.toString('ascii',4,8)==='ftyp';
+   const webm=bytes[0]===0x1a&&bytes[1]===0x45&&bytes[2]===0xdf&&bytes[3]===0xa3;
+   const valid=isVideo?(bytes.length>=256&&bytes.length<=2700000&&(mime==='video/webm'?webm:mp4)):(bytes.length>=100&&bytes.length<=1500000&&((mime==='image/jpeg'&&jpg)||(mime==='image/png'&&png)||(mime==='image/webp'&&webp)));
+   if(!valid)return err(res,400,isVideo?'Video inválido o de más de 2,7 MB':'Imagen inválida o de más de 1,5 MB');
    const old=await q('SELECT id FROM bella_content WHERE telegram_id=$1 AND web_request_key=$2',u.telegram_id,requestKey);
    if(old.length)return res.json({ok:true,id:Number(old[0].id),duplicate:true});
    if(!/^\d+$/.test(admin())||!bot())return err(res,503,'Bot o administrador no configurados');
-   const form=new FormData();form.append('chat_id',admin());form.append('caption','📸 Bella Club · Foto desde web');form.append('photo',new Blob([bytes],{type:mime}),mime==='image/jpeg'?'foto.jpg':'foto.'+mime.split('/')[1]);
-   const response=await fetch('https://api.telegram.org/bot'+bot()+'/sendPhoto',{method:'POST',body:form,signal:AbortSignal.timeout(14000)});
-   const json=await response.json();if(!json.ok||!json.result?.photo?.length)return err(res,502,'Telegram rechazó la foto');
-   let saved=await q("INSERT INTO bella_content(telegram_id,file_id,media_type,status,web_request_key) VALUES($1,$2,'photo','pending',$3) ON CONFLICT(telegram_id,web_request_key) WHERE web_request_key IS NOT NULL DO UPDATE SET web_request_key=EXCLUDED.web_request_key RETURNING id",u.telegram_id,json.result.photo.at(-1).file_id,requestKey);
-   const id=Number(saved[0].id);
-   try{await telegram('editMessageCaption',{chat_id:admin(),message_id:json.result.message_id,caption:'📥 BELLA CLUB · Publicación #'+id+'\n👤 '+(u.username||u.first_name||'Usuario')+'\n📷 Enviado desde web',reply_markup:{inline_keyboard:[[{text:'✅ Aprobar',callback_data:'review_approve_'+id},{text:'❌ Rechazar',callback_data:'review_reject_'+id}]]}})}catch(e){console.warn('review notify',e.message)}
-   return res.status(201).json({ok:true,id});
+   const method=isVideo&&mime!=='video/mp4'?'sendDocument':(isVideo?'sendVideo':'sendPhoto');
+   const field=method==='sendDocument'?'document':(isVideo?'video':'photo');
+   const ext=({'image/jpeg':'jpg','image/png':'png','image/webp':'webp','video/mp4':'mp4','video/quicktime':'mov','video/webm':'webm'})[mime];
+   const form=new FormData();form.append('chat_id',admin());form.append('caption','📥 Bella Club · '+(isVideo?'Video':'Foto')+' desde web');form.append(field,new Blob([bytes],{type:mime}),'bella-'+Date.now()+'.'+ext);
+   const response=await fetch('https://api.telegram.org/bot'+bot()+'/'+method,{method:'POST',body:form,signal:AbortSignal.timeout(22000)});
+   let json;try{json=await response.json()}catch{throw Error('Respuesta inválida del servidor de Telegram')}
+   const media=json?.result?.[field],item=Array.isArray(media)?media.at(-1):media;
+   if(!json?.ok||!item?.file_id)return err(res,502,'Telegram no pudo recibir el archivo. Intenta desde el bot');
+   const rows=await q("INSERT INTO bella_content(telegram_id,file_id,media_type,status,web_request_key,web_send_method) VALUES($1,$2,$3,'pending',$4,$5) ON CONFLICT(telegram_id,web_request_key) WHERE web_request_key IS NOT NULL DO UPDATE SET web_request_key=EXCLUDED.web_request_key RETURNING id",u.telegram_id,item.file_id,isVideo?'video':'photo',requestKey,method==='sendDocument'?'document':null);
+   const id=Number(rows[0].id);
+   const caption='📥 BELLA CLUB · Publicación #'+id+'\n👤 '+(u.username||u.first_name||'Usuario')+'\n'+(isVideo?'🎥 Video':'📷 Foto')+' enviado desde web';
+   try{await telegram('editMessageCaption',{chat_id:admin(),message_id:json.result.message_id,caption,reply_markup:{inline_keyboard:[[{text:'✅ Aprobar',callback_data:'review_approve_'+id},{text:'❌ Rechazar',callback_data:'review_reject_'+id}]]}})}catch(e){console.warn('No se pudo agregar botón revisión',e.message)}
+   return res.status(201).json({ok:true,id,mediaType:isVideo?'video':'photo'});
   }
   if(req.method==='GET'&&action==='admin'){
    if(String(u.telegram_id)!==admin())return err(res,403,'Solo administrador');
