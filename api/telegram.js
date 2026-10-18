@@ -8,7 +8,7 @@ const menu={keyboard:[[{text:'👤 Mi perfil'},{text:'💰 Saldo'}],[{text:'📸
 
 const adminId=()=>String(process.env.ADMIN_ID||'').trim();
 const isAdmin=id=>String(id||'')===adminId();
-const adminMenu={keyboard:[[{text:'📥 Revisar pendientes'},{text:'📊 Resumen'}],[{text:'🏠 Panel admin'}]],resize_keyboard:true,is_persistent:true,one_time_keyboard:false,input_field_placeholder:'Revisión de publicaciones'};
+const adminMenu={keyboard:[[{text:'📥 Revisar pendientes'},{text:'📊 Resumen'}],[{text:'💸 Retiros web'}],[{text:'🏠 Panel admin'}]],resize_keyboard:true,is_persistent:true,one_time_keyboard:false,input_field_placeholder:'Revisión de publicaciones'};
 
 async function ensureApprovalSchema(db){
  await db`ALTER TABLE bella_content ADD COLUMN IF NOT EXISTS payout_amount NUMERIC(12,2)`;
@@ -78,6 +78,38 @@ export default async function handler(req,res){
  const expectedSecret=rawSecret?createHash('sha256').update(rawSecret).digest('hex'):null;
  if(!expectedSecret||actualSecret!==expectedSecret)return res.status(403).json({ok:false,error:'Invalid webhook signature'});
  try{if(!token()||!process.env.DATABASE_URL)throw new Error('Configuration missing');const db=sql();await init(db);const u=req.body||{};const m=u.message||u.callback_query?.message;const chat=m?.chat?.id;if(!chat)return res.status(200).json({ok:true});const from=u.message?.from||u.callback_query?.from||{};await db`INSERT INTO bella_users(telegram_id,username,first_name) VALUES(${chat},${from.username||null},${from.first_name||null}) ON CONFLICT(telegram_id) DO UPDATE SET username=EXCLUDED.username,first_name=EXCLUDED.first_name,updated_at=NOW()`;const text=u.message?.text||'';const cb=u.callback_query?.data||'';
+// BELLA_WEB_BRIDGE_V1 — solo Telegram valida la identidad real.
+if(text==='/mayor18'&&isAdmin(from.id)&&String(m?.chat?.type)==='private'){
+ await db`UPDATE bella_users SET is_adult=TRUE,updated_at=NOW() WHERE telegram_id=${from.id}`;
+ await tg('sendMessage',{chat_id:chat,text:'✅ Confirmada la mayoría de edad. Puedes usar Bella Club web.'});return res.json({ok:true});
+}
+const connect=/^\/vincular(?:@\w+)?\s+([a-f0-9]{12})$/i.exec(text.trim());
+if(connect){
+ if(String(m?.chat?.type)!=='private'||String(chat)!==String(from.id)){await tg('sendMessage',{chat_id:chat,text:'🔐 Envía el código únicamente en el chat privado del bot.'});return res.json({ok:true});}
+ const allowed=await db`SELECT is_adult FROM bella_users WHERE telegram_id=${from.id}`;
+ if(!allowed[0]?.is_adult){await tg('sendMessage',{chat_id:chat,text:'🔞 Completa primero el registro +18 usando /start.'});return res.json({ok:true});}
+ const digest=createHash('sha256').update(connect[1].toUpperCase()).digest('hex');
+ const found=await db`UPDATE bella_web_links SET telegram_id=${from.id} WHERE code_hash=${digest} AND telegram_id IS NULL AND expires_at>NOW() RETURNING id`;
+ await tg('sendMessage',{chat_id:chat,text:found.length?'✅ Bella Club vinculada. Regresa al navegador y pulsa «Ya envié el código».':'⚠️ El código caducó o ya fue utilizado. Genera uno nuevo.'});return res.json({ok:true});
+}
+const wd=/^webwd_(paid|reject)_(\d+)$/.exec(cb);
+if(wd){
+ if(!isAdmin(from.id)){await tg('answerCallbackQuery',{callback_query_id:u.callback_query.id,text:'No autorizado',show_alert:true});return res.json({ok:true});}
+ const status=wd[1]==='paid'?'paid':'rejected';const wdId=Number(wd[2]);
+ const result=await db`WITH w AS (SELECT id,telegram_id,amount FROM bella_withdrawals WHERE id=${wdId} AND status='pending' FOR UPDATE), balanced AS (UPDATE bella_users AS b SET reserved_balance=b.reserved_balance-w.amount,balance=b.balance+CASE WHEN ${status}='rejected' THEN w.amount ELSE 0 END,updated_at=NOW() FROM w WHERE b.telegram_id=w.telegram_id AND b.reserved_balance>=w.amount RETURNING b.telegram_id), changed AS (UPDATE bella_withdrawals AS t SET status=${status} FROM w JOIN balanced b ON b.telegram_id=w.telegram_id WHERE t.id=w.id AND t.status='pending' RETURNING t.id,t.telegram_id,t.amount) SELECT * FROM changed`;
+ await tg('answerCallbackQuery',{callback_query_id:u.callback_query.id,text:result.length?'Retiro actualizado':'Retiro ya revisado o saldo insuficiente'});
+ if(result.length){try{await tg('editMessageReplyMarkup',{chat_id:chat,message_id:m.message_id,reply_markup:{inline_keyboard:[]}})}catch(e){}
+ const msg=status==='paid'?'✅ PIX marcado como pagado':'❌ PIX rechazado, saldo devuelto';
+ await tg('sendMessage',{chat_id:chat,text:msg+' · Retiro #'+wdId});
+ try{await tg('sendMessage',{chat_id:String(result[0].telegram_id),text:msg+' · Retiro #'+wdId})}catch(e){console.warn('withdraw notice failed',e.message)}
+ }return res.json({ok:true});
+}
+if(isAdmin(from.id)&&(text==='/retirosweb'||text==='💸 Retiros web')){
+ const pending=await db`SELECT id,telegram_id,amount,pix_key FROM bella_withdrawals WHERE status='pending' ORDER BY id DESC LIMIT 10`;
+ if(!pending.length)await tg('sendMessage',{chat_id:chat,text:'✅ No hay retiros pendientes.',reply_markup:adminMenu});
+ for(const x of pending)await tg('sendMessage',{chat_id:chat,text:'💸 PIX #'+x.id+'\nUsuario: '+x.telegram_id+'\nImporte: R$ '+Number(x.amount).toFixed(2)+'\nClave: '+x.pix_key+'\nPaga manualmente antes de confirmar.',reply_markup:{inline_keyboard:[[{text:'✅ Marcar pagado',callback_data:'webwd_paid_'+x.id},{text:'❌ Rechazar y devolver',callback_data:'webwd_reject_'+x.id}]]}});
+ return res.json({ok:true});
+}
 if(isAdmin(from.id)&&(cb.startsWith('lang_')||cb==='adult_yes'||cb==='adult_no')){
  await tg('answerCallbackQuery',{callback_query_id:u.callback_query.id,text:'Usa el panel administrador.'});
  await tg('sendMessage',{chat_id:chat,text:'🛡️ BELLA CLUB · Panel administrador',reply_markup:adminMenu});
