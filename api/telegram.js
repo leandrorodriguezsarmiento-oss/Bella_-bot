@@ -4,8 +4,15 @@ const token=()=>process.env.TELEGRAM_TOKEN||process.env.TELEGRAM_BOT_TOKEN;
 const sql=()=>neon(process.env.DATABASE_URL);
 async function tg(method,body){const r=await fetch(`https://api.telegram.org/bot${token()}/${method}`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});const j=await r.json();if(!j.ok)throw new Error(j.description||'Telegram error');return j.result;}
 async function init(db){await db`CREATE TABLE IF NOT EXISTS bella_users (telegram_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT, language TEXT DEFAULT 'es', is_adult BOOLEAN DEFAULT FALSE, balance NUMERIC(12,2) DEFAULT 0, reserved_balance NUMERIC(12,2) DEFAULT 0, pix_key TEXT, state TEXT DEFAULT 'menu', created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW())`;await db`CREATE TABLE IF NOT EXISTS bella_content (id BIGSERIAL PRIMARY KEY, telegram_id BIGINT REFERENCES bella_users(telegram_id), file_id TEXT NOT NULL, media_type TEXT NOT NULL, status TEXT DEFAULT 'pending', created_at TIMESTAMPTZ DEFAULT NOW())`;await db`CREATE TABLE IF NOT EXISTS bella_withdrawals (id BIGSERIAL PRIMARY KEY, telegram_id BIGINT REFERENCES bella_users(telegram_id), amount NUMERIC(12,2) NOT NULL, pix_key TEXT, status TEXT DEFAULT 'pending', created_at TIMESTAMPTZ DEFAULT NOW())`;}
-const menu={keyboard:[[{text:'👤 Mi perfil'},{text:'💰 Saldo'}],[{text:'📸 Enviar contenido'},{text:'💸 Retirar PIX'}],[{text:'📜 Historial'}]],resize_keyboard:true};
+const menu={keyboard:[[{text:'👤 Mi perfil'},{text:'💰 Saldo'}],[{text:'📸 Enviar contenido'},{text:'💸 Retirar PIX'}],[{text:'📜 Historial'},{text:'📋 Normas de publicación'}]],resize_keyboard:true};
 
+// BELLA_CONTENT_NOTICE_2026: contenido propio y voluntario, solo para adultos
+const contentNotices={
+ es:'📋 BELLA CLUB · REQUISITOS DE PUBLICACIÓN\n\n🔞 Exclusivo para personas adultas (+18). Solo se permite contenido propio, creado y compartido voluntariamente.\n\n📸 FOTOS: Si decides participar, deben ser sin ropa, con buena iluminación, imagen nítida y fondo sencillo. Usa un encuadre cómodo y evita incluir datos personales o a otras personas.\n\n🎥 VIDEOS: Si decides participar, también deben ser sin ropa, con imagen clara y cámara estable. No es obligatorio mostrar tu rostro.\n\n❌ Las fotos o videos con ropa, ajenos o que no cumplan estas normas pueden ser rechazados.\n\n🔐 Nunca envíes contenido de menores ni de terceros sin su autorización. Participar es completamente opcional.',
+ pt:'📋 BELLA CLUB · REGRAS DE PUBLICAÇÃO\n\n🔞 Exclusivo para maiores de 18 anos. Envie apenas conteúdo próprio, produzido e compartilhado voluntariamente.\n\n📸 FOTOS: Se optar por participar, devem ser sem roupa, com boa iluminação, imagem nítida e fundo simples. Evite dados pessoais e outras pessoas na imagem.\n\n🎥 VÍDEOS: Se optar por participar, também devem ser sem roupa, com imagem clara e câmera estável. Mostrar o rosto não é obrigatório.\n\n❌ Fotos ou vídeos com roupa, de terceiros ou fora destas regras podem ser rejeitados.\n\n🔐 Nunca envie conteúdo de menores ou terceiros sem autorização. A participação é opcional.',
+ en:'📋 BELLA CLUB · SUBMISSION REQUIREMENTS\n\n🔞 Adults 18+ only. Submit only your own content, created and shared voluntarily.\n\n📸 PHOTOS: If you choose to participate, photos must be without clothing, well lit, clear, and taken against a simple background. Avoid personal details or other people in the frame.\n\n🎥 VIDEOS: If you choose to participate, videos must also be without clothing, clear and stable. Showing your face is not required.\n\n❌ Clothed content, third-party media, or submissions that break these rules may be rejected.\n\n🔐 Never send content involving minors or others without consent. Participation is optional.'
+};
+const contentNotice=lang=>contentNotices[lang]||contentNotices.es;
 const adminId=()=>String(process.env.ADMIN_ID||'').trim();
 const isAdmin=id=>String(id||'')===adminId();
 const adminMenu={keyboard:[[{text:'📥 Revisar pendientes'},{text:'📊 Resumen'}],[{text:'💸 Retiros web'}],[{text:'🏠 Panel admin'}]],resize_keyboard:true,is_persistent:true,one_time_keyboard:false,input_field_placeholder:'Revisión de publicaciones'};
@@ -232,6 +239,18 @@ if(text==='/miid'||text==='/id'){
  return res.status(200).json({ok:true});
 }
 // El administrador tiene un panel exclusivo; no utiliza el menú de clientes.
+if(isAdmin(from.id)&&text==='/avisar_normas'){
+ if(String(m?.chat?.type)!=='private'){await tg('sendMessage',{chat_id:chat,text:'🔐 Usa este comando únicamente en el chat privado del bot.'});return res.status(200).json({ok:true});}
+ const recipients=await db`SELECT telegram_id,language FROM bella_users WHERE is_adult=TRUE AND telegram_id<>${from.id} ORDER BY telegram_id LIMIT 100`;
+ let sent=0,failed=0;
+ for(const recipient of recipients){
+  try{await tg('sendMessage',{chat_id:String(recipient.telegram_id),text:contentNotice(recipient.language),reply_markup:menu});sent++;}
+  catch(e){failed++;console.warn('rules_notice_delivery_failed',String(recipient.telegram_id),e.message)}
+ }
+ const total=await db`SELECT COUNT(*)::int AS n FROM bella_users WHERE is_adult=TRUE AND telegram_id<>${from.id}`;
+ await tg('sendMessage',{chat_id:chat,text:'📨 Aviso de normas enviado.\n✅ Entregados: '+sent+'\n⚠️ No entregados: '+failed+(Number(total[0].n)>100?'\nℹ️ Se procesaron los primeros 100 usuarios.':'')+'\n\nSe contactó solamente a cuentas que confirmaron ser +18 en el bot.',reply_markup:adminMenu});
+ return res.status(200).json({ok:true});
+}
 if(isAdmin(from.id)){
  if(text==='/cancelar'){
   await ensureApprovalSchema(db);
@@ -239,7 +258,7 @@ if(isAdmin(from.id)){
   await tg('sendMessage',{chat_id:chat,text:'🚫 Operación cancelada. No se ha abonado ningún importe.',reply_markup:adminMenu});
   return res.status(200).json({ok:true});
  }
- if(u.message?.text && !['/start','/admin','/panel','/pendientes','/miid','/id','🏠 Panel admin','📥 Revisar pendientes','📊 Resumen'].includes(text)){
+ if(u.message?.text && !['/start','/admin','/panel','/pendientes','/miid','/id','/avisar_normas','🏠 Panel admin','📥 Revisar pendientes','📊 Resumen'].includes(text)){
   await ensureApprovalSchema(db);
   const draft=await paymentDraft(db,from.id);
   if(draft){
@@ -282,9 +301,10 @@ if(text==='/pendientes'){
 
 if(text==='/start'){await tg('sendMessage',{chat_id:chat,text:'🔥 Bienvenido a Bella Club\n\n🌐 Selecciona tu idioma:',reply_markup:{inline_keyboard:[[{text:'🇪🇸 Español',callback_data:'lang_es'},{text:'🇧🇷 Português',callback_data:'lang_pt'}],[{text:'🇺🇸 English',callback_data:'lang_en'}]]}});return res.status(200).json({ok:true});}
 const rows=await db`SELECT * FROM bella_users WHERE telegram_id=${chat}`;const user=rows[0];if(!user?.is_adult){await tg('sendMessage',{chat_id:chat,text:'Escribe /start para completar el registro.'});return res.status(200).json({ok:true});}
+if(text==='/normas'||text==='📋 Normas de publicación'){await tg('sendMessage',{chat_id:chat,text:contentNotice(user.language),reply_markup:menu});return res.status(200).json({ok:true});}
 if(text==='💰 Saldo'){await tg('sendMessage',{chat_id:chat,text:`💰 Saldo disponible: R$ ${Number(user.balance||0).toFixed(2)}\n🔒 Reservado: R$ ${Number(user.reserved_balance||0).toFixed(2)}`,reply_markup:menu});return res.status(200).json({ok:true});}
 if(text==='👤 Mi perfil'){await tg('sendMessage',{chat_id:chat,text:`👤 Perfil Bella Club\n\nNombre: ${user.first_name||'-'}\nUsuario: ${user.username?'@'+user.username:'-'}\nIdioma: ${user.language}\n+18: ✅`,reply_markup:menu});return res.status(200).json({ok:true});}
-if(text==='📸 Enviar contenido'){await db`UPDATE bella_users SET state='await_content' WHERE telegram_id=${chat}`;await tg('sendMessage',{chat_id:chat,text:'📸 Envíame ahora una foto o video para revisión.'});return res.status(200).json({ok:true});}
+if(text==='📸 Enviar contenido'){await db`UPDATE bella_users SET state='await_content' WHERE telegram_id=${chat}`;await tg('sendMessage',{chat_id:chat,text:contentNotice(user.language)+'\n\n📤 Cuando lo tengas, envía aquí tu foto o video para revisión.',reply_markup:menu});return res.status(200).json({ok:true});}
 if(u.message?.photo||u.message?.video){
  const type=u.message.video?'video':'photo';
  const fid=u.message.video?.file_id||u.message.photo?.at(-1)?.file_id;
